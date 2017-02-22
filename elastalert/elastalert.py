@@ -205,7 +205,7 @@ class ElastAlerter():
             aggs_element = metric_agg_element
 
         if query_key is not None:
-            aggs_element = {'bucket_aggs': {'terms': {'field': query_key, 'size': terms_size}, 'aggs': aggs_element}}
+            aggs_element = {'term_aggs': {'terms': {'field': query_key, 'size': terms_size}, 'aggs': aggs_element}}
 
         if not self.is_five():
             query_element['filtered'].update({'aggs': aggs_element})
@@ -411,8 +411,9 @@ class ElastAlerter():
             payload = res['aggregations']['filtered']
         else:
             payload = res['aggregations']
-        lt = rule.get('use_local_time')
+        #lt = rule.get('use_local_time')
         self.num_hits += res['hits']['total']
+        payload['total_doc_count'] = res['hits']['total']
         return {endtime: payload}
 
     def remove_duplicate_events(self, data, rule):

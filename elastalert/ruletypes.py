@@ -868,23 +868,24 @@ class BaseAggregationRule(RuleType):
         for timestamp, payload_data in payload.iteritems():
             if 'interval_aggs' in payload_data:
                 self.unwrap_interval_buckets(timestamp, None, payload_data['interval_aggs']['buckets'])
-            elif 'bucket_aggs' in payload_data:
-                self.unwrap_term_buckets(timestamp, payload_data['bucket_aggs']['buckets'])
+            elif 'term_aggs' in payload_data:
+                self.unwrap_term_buckets(timestamp, payload_data['term_aggs']['buckets'])
             else:
-                self.check_matches(timestamp, None, payload_data)
+                self.check_matches(timestamp, None, payload_data['total_doc_count'], payload_data)
 
     def unwrap_interval_buckets(self, timestamp, query_key, interval_buckets):
         for interval_data in interval_buckets:
-            self.check_matches(timestamp, query_key, interval_data)
+            self.check_matches(timestamp, query_key, interval_data['doc_count'], interval_data)
 
     def unwrap_term_buckets(self, timestamp, term_buckets):
         for term_data in term_buckets:
             if 'interval_aggs' in term_data:
+                # If we have inner date_histogram use the bucket doc_count instead of total_doc_count
                 self.unwrap_interval_buckets(timestamp, term_data['key'], term_data['interval_aggs']['buckets'])
             else:
-                self.check_matches(timestamp, term_data['key'], term_data)
+                self.check_matches(timestamp, term_data['key'], term_data['doc_count'], term_data)
 
-    def check_matches(self, timestamp, query_key, aggregation_data):
+    def check_matches(self, timestamp, query_key, total_doc_count, aggregation_data):
         raise NotImplementedError()
 
 
@@ -913,7 +914,7 @@ class MetricAggregationRule(BaseAggregationRule):
     def generate_aggregation_query(self):
         return {self.metric_key: {self.rules['metric_agg_type']: {'field': self.rules['metric_agg_key']}}}
 
-    def check_matches(self, timestamp, query_key, aggregation_data):
+    def check_matches(self, timestamp, query_key, total_doc_count, aggregation_data):
         metric_val = aggregation_data[self.metric_key]['value']
         if self.check_thresholds(metric_val):
             match = {self.rules['timestamp_field']: timestamp,
@@ -929,3 +930,33 @@ class MetricAggregationRule(BaseAggregationRule):
         if 'min_threshold' in self.rules and metric_value < self.rules['min_threshold']:
             return True
         return False
+
+
+class BucketAggregationRule(BaseAggregationRule):
+    required_options = frozenset(['bucket_agg_key', 'bucket_agg_type'])
+    allowed_aggregations = frozenset(['filters', 'range'])
+
+    def __init__(self, *args):
+        super(BucketAggregationRule, self).__init__(*args)
+        self.bucket_agg_key = self.rules['bucket_agg_key'] 
+        self.bucket_agg_type = self.rules['bucket_agg_type']
+        self.bucket_agg_key_value = self.rules['bucket_agg_key_value']
+        self.bucket_agg_key_from_value = self.rules['bucket_agg_key_from_value']
+        self.bucket_agg_key_to_value = self.rules['bucket_agg_key_to_value']
+        self.rules['aggregation_query_element'] = self.generate_aggregation_query()
+
+    def get_match_str(self, match):
+        message = 'Threshold violation, %s:%s %s (min: %s max : %s) \n\n' % (self.rules['metric_agg_type'], self.rules['metric_agg_key'], match[self.metric_key], self.rules.get('min_threshold'), self.rules.get('max_threshold'))
+        return message
+
+    def generate_aggregation_query(self):
+        if self.bucket_agg_type == 'filters':
+            return {'filters_aggs': {'filters': { 'other_bucket': True, 'filters': { '%s_%s' % (self.bucket_agg_key,+ self.bucket_agg_key_value) : {'term' : { self.bucket_agg_key : self.bucket_agg_key_value}}}}}}
+        elif self.bucket_agg_type == 'range':
+            return {'range_aggs': { 'range': {'field': self.bucket_agg_key, 'keyed': True, 'ranges': [{ 'key': 'range_bucket', 'from' : self.bucket_agg_key_from_value, 'to' : self.bucket_agg_key_to_value }]}}}
+
+    def check_matches(self, timestamp, query_key, total_doc_count, aggregation_data):
+        return 
+
+    def check_thresholds(self, metric_value):
+        return
