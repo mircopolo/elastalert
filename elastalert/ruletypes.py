@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from __future__ import division
 import copy
 import datetime
 
@@ -840,6 +841,9 @@ class BaseAggregationRule(RuleType):
     def __init__(self, *args):
         super(BaseAggregationRule, self).__init__(*args)
         bucket_interval = self.rules.get('bucket_interval')
+        if 'max_threshold' not in self.rules and 'min_threshold' not in self.rules:
+            raise EAException("MetricAggregationRule must have at least one of either max_threshold or min_threshold")
+
         if bucket_interval:
             if 'seconds' in bucket_interval:
                 self.rules['bucket_interval_period'] = str(bucket_interval['seconds']) + 's'
@@ -888,6 +892,13 @@ class BaseAggregationRule(RuleType):
     def check_matches(self, timestamp, query_key, total_doc_count, aggregation_data):
         raise NotImplementedError()
 
+    def check_thresholds(self, metric_value):
+        if 'max_threshold' in self.rules and metric_value >= self.rules['max_threshold']:
+            return True
+        if 'min_threshold' in self.rules and metric_value < self.rules['min_threshold']:
+            return True
+        return False
+
 
 class MetricAggregationRule(BaseAggregationRule):
     """ A rule that matches when there is a low number of events given a timeframe. """
@@ -897,8 +908,6 @@ class MetricAggregationRule(BaseAggregationRule):
     def __init__(self, *args):
         super(MetricAggregationRule, self).__init__(*args)
         self.ts_field = self.rules.get('timestamp_field', '@timestamp')
-        if 'max_threshold' not in self.rules and 'min_threshold' not in self.rules:
-            raise EAException("MetricAggregationRule must have at least one of either max_threshold or min_threshold")
 
         self.metric_key = self.rules['metric_agg_key'] + '_' + self.rules['metric_agg_type']
 
@@ -924,17 +933,10 @@ class MetricAggregationRule(BaseAggregationRule):
             self.add_match(match)
         return
 
-    def check_thresholds(self, metric_value):
-        if 'max_threshold' in self.rules and metric_value >= self.rules['max_threshold']:
-            return True
-        if 'min_threshold' in self.rules and metric_value < self.rules['min_threshold']:
-            return True
-        return False
-
 
 class BucketAggregationRule(BaseAggregationRule):
     required_options = frozenset(['bucket_agg_key', 'bucket_agg_type'])
-    allowed_aggregations = frozenset(['filters', 'range'])
+    allowed_aggregations = frozenset(['filters', 'range', 'missing'])
 
     def __init__(self, *args):
         super(BucketAggregationRule, self).__init__(*args)
@@ -946,17 +948,26 @@ class BucketAggregationRule(BaseAggregationRule):
         self.rules['aggregation_query_element'] = self.generate_aggregation_query()
 
     def get_match_str(self, match):
-        message = 'Threshold violation, %s:%s %s (min: %s max : %s) \n\n' % (self.rules['metric_agg_type'], self.rules['metric_agg_key'], match[self.metric_key], self.rules.get('min_threshold'), self.rules.get('max_threshold'))
+        message = 'Threshold violation, %s:%s (min: %s max : %s) \n\n' % (self.rules['bucket_agg_type'], self.rules['bucket_agg_type'], self.rules.get('min_threshold'), self.rules.get('max_threshold'))
         return message
 
     def generate_aggregation_query(self):
         if self.bucket_agg_type == 'filters':
-            return {'filters_aggs': {'filters': { 'other_bucket': True, 'filters': { '%s_%s' % (self.bucket_agg_key,+ self.bucket_agg_key_value) : {'term' : { self.bucket_agg_key : self.bucket_agg_key_value}}}}}}
+            return {'bucket_agg': {'filters': { 'filters': { 'result' : {'term' : { self.bucket_agg_key : self.bucket_agg_key_value}}}}}}
         elif self.bucket_agg_type == 'range':
-            return {'range_aggs': { 'range': {'field': self.bucket_agg_key, 'keyed': True, 'ranges': [{ 'key': 'range_bucket', 'from' : self.bucket_agg_key_from_value, 'to' : self.bucket_agg_key_to_value }]}}}
+            return {'bucket_agg': { 'range': {'field': self.bucket_agg_key, 'keyed': True, 'ranges': [{ 'key': 'result', 'from' : self.bucket_agg_key_from_value, 'to' : self.bucket_agg_key_to_value }]}}}
 
     def check_matches(self, timestamp, query_key, total_doc_count, aggregation_data):
-        return 
+        if self.bucket_agg_type == 'filters' or self.bucket_agg_type == 'range': 
+            filter_count = aggregation_data['bucket_agg']['buckets']['result']['doc_count']
+            
+            metric_val = (filter_count / total_doc_count) * 100
 
-    def check_thresholds(self, metric_value):
+            if self.check_thresholds(metric_val):
+                match = {self.rules['timestamp_field']: timestamp,
+                         'Percentage': metric_val}
+            if query_key is not None:
+                match[self.rules['query_key']] = query_key
+            self.add_match(match)
         return
+
