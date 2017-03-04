@@ -1,0 +1,4 @@
+{
+  "tests/config_test.py::test_get_file_paths": true, 
+  "tests/config_test.py::test_get_file_paths_recursive": true
+}
